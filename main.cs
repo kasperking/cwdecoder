@@ -8,27 +8,33 @@ using System.Windows.Forms;
 using NAudio.Wave;
 using NAudio.Dsp;
 using ScottPlot;
-using ScottPlot.WinForms;
+using ScottPlot.Plottable;
 
 namespace MorseCodeTranslator
 {
     public partial class MainForm : Form
     {
-        // Audio Processing
+        #region Audio Configuration
+        private bool autoThreshold = true;
+        private double noiseFloor = -60; // Minimum expected noise level in dB
+        private CheckBox cbAutoThreshold;
         private WaveInEvent waveIn;
         private Complex[] fftBuffer;
         private int fftPos;
         private int targetFrequency = 600;
         private float threshold = 0.1f;
         private bool isRecording;
+        private const int FFT_SIZE = 1024;
+        private const int SAMPLE_RATE = 48000;
+        #endregion
 
-        // Morse Code Handling
+        #region Morse Code Configuration
         private MorseDecoder decoder;
         private SerialPort serialPort;
         private bool isTransmitting;
+        #endregion
 
-        // UI Components
-        private GroupBox groupAudio, groupCom;
+        #region UI Components
         private ComboBox cbAudioInput, cbComPorts;
         private NumericUpDown nudFrequency, nudSpeed;
         private TrackBar tbThreshold;
@@ -36,41 +42,45 @@ namespace MorseCodeTranslator
         private Button btnStartStop, btnSend, btnRefreshAudio, btnRefreshCom;
         private RadioButton rbDTR, rbRTS;
         private FormsPlot formsPlot;
+        private VLine vLine;
         private Panel plotPanel;
+        #endregion
 
         public MainForm()
         {
-            InitializeComponent();
+            InitializeUIComponents();
             InitializeAudio();
             InitializeMorse();
             InitializePlot();
+            RefreshDevices();
         }
 
-        private void InitializeComponent()
+        #region Initialization
+        private void InitializeUIComponents()
         {
-            // Form Setup
+            // Configure main form
             this.Text = "Morse Code Translator";
-            this.Size = new Size(800, 650);
+            this.Size = new Size(900, 700);
             this.Font = new Font("Segoe UI", 9f);
             this.FormClosing += (s, e) => CleanupResources();
 
-            // Audio Input Group
-            groupAudio = new GroupBox()
+            // Create audio input group
+            var groupAudio = new GroupBox()
             {
                 Text = "Audio Input",
                 Location = new Point(10, 10),
-                Size = new Size(380, 150)
+                Size = new Size(430, 150)
             };
 
-            cbAudioInput = new ComboBox { Location = new Point(10, 20), Size = new Size(240, 21) };
-            btnRefreshAudio = new Button { Text = "Refresh", Location = new Point(260, 20), Size = new Size(100, 23) };
+            cbAudioInput = new ComboBox { Location = new Point(10, 20), Size = new Size(300, 21) };
+            btnRefreshAudio = new Button { Text = "Refresh", Location = new Point(320, 20), Size = new Size(100, 30) };
             btnRefreshAudio.Click += (s, e) => RefreshAudioDevices();
 
             btnStartStop = new Button
             {
                 Text = "Start Listening",
                 Location = new Point(10, 50),
-                Size = new Size(350, 30),
+                Size = new Size(410, 30),
                 BackColor = Color.LimeGreen,
                 ForeColor = Color.White
             };
@@ -78,12 +88,26 @@ namespace MorseCodeTranslator
 
             nudFrequency = new NumericUpDown()
             {
-                Minimum = 300,
-                Maximum = 3000,
+                Minimum = 0,
+                Maximum = 4000,
                 Value = 600,
-                Location = new Point(120, 90),
+                Location = new Point(110, 90),
                 Size = new Size(80, 20)
             };
+
+            cbAutoThreshold = new CheckBox
+            {
+                Text = "Auto Threshold",
+                Location = new Point(290, 120),
+                Size = new Size(120, 20),
+                Checked = true
+            };
+            cbAutoThreshold.CheckedChanged += (s, e) =>
+            {
+                autoThreshold = cbAutoThreshold.Checked;
+                tbThreshold.Enabled = !autoThreshold;
+            };
+            groupAudio.Controls.Add(cbAutoThreshold);
 
             tbThreshold = new TrackBar()
             {
@@ -95,25 +119,23 @@ namespace MorseCodeTranslator
             };
 
             groupAudio.Controls.AddRange(new Control[] {
-                cbAudioInput,
-                btnRefreshAudio,
-                btnStartStop,
+                cbAudioInput, btnRefreshAudio, btnStartStop,
                 new Label { Text = "Frequency (Hz):", Location = new Point(10, 90) },
                 nudFrequency,
                 new Label { Text = "Threshold:", Location = new Point(10, 120) },
                 tbThreshold
             });
 
-            // COM Port Group
-            groupCom = new GroupBox()
+            // Create COM port group
+            var groupCom = new GroupBox()
             {
                 Text = "COM Port",
-                Location = new Point(400, 10),
-                Size = new Size(380, 150)
+                Location = new Point(450, 10),
+                Size = new Size(430, 150)
             };
 
-            cbComPorts = new ComboBox { Location = new Point(10, 20), Size = new Size(240, 21) };
-            btnRefreshCom = new Button { Text = "Refresh", Location = new Point(260, 20), Size = new Size(100, 23) };
+            cbComPorts = new ComboBox { Location = new Point(10, 20), Size = new Size(300, 21) };
+            btnRefreshCom = new Button { Text = "Refresh", Location = new Point(320, 20), Size = new Size(100, 30) };
             btnRefreshCom.Click += (s, e) => RefreshComPorts();
 
             rbDTR = new RadioButton { Text = "DTR", Location = new Point(10, 90), Checked = true };
@@ -124,49 +146,48 @@ namespace MorseCodeTranslator
                 Minimum = 5,
                 Maximum = 40,
                 Value = 20,
-                Location = new Point(140, 120),
+                Location = new Point(120, 120),
                 Size = new Size(80, 20)
             };
 
             groupCom.Controls.AddRange(new Control[] {
-                cbComPorts,
-                btnRefreshCom,
-                rbDTR,
-                rbRTS,
+                cbComPorts, btnRefreshCom, rbDTR, rbRTS,
                 new Label { Text = "Speed (WPM):", Location = new Point(10, 120) },
                 nudSpeed
             });
 
-            // Signal Display
+            // Create signal display panel
             plotPanel = new Panel()
             {
                 Location = new Point(10, 170),
-                Size = new Size(770, 200),
+                Size = new Size(870, 300),
                 BackColor = Color.Black
             };
 
-            // Text Displays
+            // Create text displays
             txtDecoded = new TextBox()
             {
                 Multiline = true,
                 ScrollBars = ScrollBars.Vertical,
-                Location = new Point(10, 380),
-                Size = new Size(770, 100)
+                Location = new Point(10, 480),
+                Size = new Size(870, 100)
             };
 
             txtMessage = new TextBox()
             {
-                Location = new Point(10, 490),
-                Size = new Size(600, 25)
+                Location = new Point(10, 590),
+                Size = new Size(700, 25)
             };
 
             btnSend = new Button()
             {
                 Text = "Send",
-                Location = new Point(620, 490),
+                Location = new Point(720, 590),
                 Size = new Size(160, 25)
             };
+            btnSend.Click += BtnSend_Click;
 
+            // Add all controls to form
             this.Controls.AddRange(new Control[] {
                 groupAudio,
                 groupCom,
@@ -176,65 +197,66 @@ namespace MorseCodeTranslator
                 btnSend
             });
 
-            // Event Handlers
-            btnSend.Click += BtnSend_Click;
-            nudFrequency.ValueChanged += (s, e) => targetFrequency = (int)nudFrequency.Value;
-            tbThreshold.Scroll += (s, e) => threshold = tbThreshold.Value / 100f;
-            cbComPorts.SelectedIndexChanged += (s, e) => UpdateSerialPort();
+            // Initialize plot
+            formsPlot = new FormsPlot { Dock = DockStyle.Fill };
+            plotPanel.Controls.Add(formsPlot);
         }
 
         private void InitializeAudio()
         {
+            fftBuffer = new Complex[FFT_SIZE];
             waveIn = new WaveInEvent
             {
-                WaveFormat = new WaveFormat(8000, 16, 1),
-                BufferMilliseconds = 50,
-                DeviceNumber = 0
+                WaveFormat = new WaveFormat(SAMPLE_RATE, 16, 1),
+                BufferMilliseconds = 10
             };
-
             waveIn.DataAvailable += ProcessAudio;
-            waveIn.RecordingStopped += (s, a) => SafeInvoke(() =>
-            {
-                isRecording = false;
-                btnStartStop.Text = "Start Listening";
-                btnStartStop.BackColor = Color.LimeGreen;
-            });
-
-            fftBuffer = new Complex[1024];
-            RefreshAudioDevices();
+            waveIn.RecordingStopped += (s, a) => SafeInvoke(() => UpdateRecordingState(false));
         }
 
         private void InitializeMorse()
         {
             decoder = new MorseDecoder();
             decoder.OnCharacterDecoded += (s, c) => SafeInvoke(() => txtDecoded.AppendText(c.ToString()));
-            RefreshComPorts();
         }
 
         private void InitializePlot()
         {
-            formsPlot = new FormsPlot { Dock = DockStyle.Fill };
-            plotPanel.Controls.Add(formsPlot);
-
             formsPlot.Plot.Title("FFT Spectrum", size: 14);
+            formsPlot.Plot.YLabel("Magnitude (dB)");
             formsPlot.Plot.XLabel("Frequency (Hz)");
-            formsPlot.Plot.YLabel("Magnitude");
             formsPlot.Plot.Style(ScottPlot.Style.Black);
             formsPlot.Plot.Grid(color: Color.FromArgb(40, 255, 255, 255));
-        }
 
+            vLine = formsPlot.Plot.AddVerticalLine(targetFrequency, Color.Red, 1);
+            vLine.DragEnabled = true;
+            vLine.Dragged += (s, e) => UpdateTargetFrequency((int)vLine.X);
+            formsPlot.MouseDown += (s, e) =>
+            {
+                if (e.Button == MouseButtons.Left)
+                    UpdateTargetFrequency((int)formsPlot.GetMouseCoordinates().x);
+            };
+        }
+        #endregion
+
+        #region Audio Processing
         private void ProcessAudio(object sender, WaveInEventArgs e)
         {
             for (int i = 0; i < e.BytesRecorded; i += 2)
             {
                 float sample = BitConverter.ToInt16(e.Buffer, i) / 32768f;
-                fftBuffer[fftPos].X = sample;
-                fftBuffer[fftPos].Y = 0;
-                fftPos++;
 
-                if (fftPos >= fftBuffer.Length)
+                if (fftPos < FFT_SIZE)
                 {
-                    FastFourierTransform.FFT(true, (int)Math.Log(fftBuffer.Length, 2), fftBuffer);
+                    double window = 0.54 - 0.46 * Math.Cos(2 * Math.PI * fftPos / FFT_SIZE);
+                    fftBuffer[fftPos].X = (float)(sample * window);
+                    fftBuffer[fftPos].Y = 0;
+                    fftPos++;
+                }
+
+                if (fftPos >= FFT_SIZE)
+                {
+                    FastFourierTransform.FFT(true, (int)Math.Log(FFT_SIZE, 2), fftBuffer);
                     UpdateFFTDisplay();
                     DetectMorseTone();
                     fftPos = 0;
@@ -244,85 +266,92 @@ namespace MorseCodeTranslator
 
         private void UpdateFFTDisplay()
         {
-            if (waveIn?.WaveFormat == null) return;
+            var magnitudes = new double[FFT_SIZE / 2];
+            var frequencies = new double[FFT_SIZE / 2];
+            double freqStep = (double)SAMPLE_RATE / FFT_SIZE;
 
-            var sampleRate = waveIn.WaveFormat.SampleRate;
-            var fftSize = fftBuffer.Length;
-            var pointCount = fftSize / 2;
-
-            var freqStep = (double)sampleRate / fftSize;
-            var frequencies = Enumerable.Range(0, pointCount)
-                                       .Select(i => i * freqStep)
-                                       .ToArray();
-
-            var magnitudes = new double[pointCount];
-            for (int i = 0; i < pointCount; i++)
+            for (int i = 0; i < magnitudes.Length; i++)
             {
-                magnitudes[i] = Math.Sqrt(fftBuffer[i].X * fftBuffer[i].X +
-                                        fftBuffer[i].Y * fftBuffer[i].Y);
+                magnitudes[i] = 20 * Math.Log10(Math.Sqrt(
+                    fftBuffer[i].X * fftBuffer[i].X +
+                    fftBuffer[i].Y * fftBuffer[i].Y) / FFT_SIZE);
+                frequencies[i] = i * freqStep;
             }
 
             SafeInvoke(() =>
             {
+                // Auto-threshold calculation
+                if (autoThreshold && magnitudes.Length > 0)
+                {
+                    // Calculate 95th percentile magnitude
+                    var sorted = magnitudes.Where(m => m > noiseFloor).OrderBy(m => m).ToArray();
+                    if (sorted.Length > 0)
+                    {
+                        double percentile95 = sorted[(int)(sorted.Length * 0.95)];
+                        threshold = (float)((percentile95 - noiseFloor) / -noiseFloor); // Convert to 0-1 range
+                        tbThreshold.Value = (int)(threshold * 100);
+                    }
+                }
+
                 formsPlot.Plot.Clear();
-                var scatter = formsPlot.Plot.AddScatter(frequencies, magnitudes);
-                scatter.Color = Color.Cyan;
-                scatter.LineWidth = 1;
+                var sig = formsPlot.Plot.AddSignalXY(frequencies, magnitudes);
+                sig.Color = Color.Cyan;
+                sig.LineWidth = 1.5f;
+                vLine.X = targetFrequency;
+                formsPlot.Plot.SetAxisLimitsX(5, 3000);
 
-                var vLine = formsPlot.Plot.AddVerticalLine(targetFrequency, Color.Red, 1);
-                vLine.PositionLabel = true;
-                vLine.Label = $"{targetFrequency} Hz";
+                // Automatically adjust Y-axis based on current magnitudes
+                if (magnitudes.Length > 0)
+                {
+                    double currentMax = magnitudes.Max();
+                    double currentMin = magnitudes.Min();
+                    double padding = 5.0; // 5dB padding
 
-                formsPlot.Plot.SetAxisLimitsX(0, targetFrequency * 2);
-                formsPlot.Plot.SetAxisLimitsY(0, magnitudes.Max() * 1.2);
+                    // Ensure valid range for dB scale
+                    double yMax = Math.Min(currentMax + padding, 0); // Never exceed 0dB
+                    double yMin = currentMin - padding;
+
+                    // Ensure minimum range of 20dB for better visibility
+                    if (yMax - yMin < 20)
+                    {
+                        yMin = yMax - 20;
+                    }
+
+                    formsPlot.Plot.SetAxisLimitsY(yMin, yMax);
+                }
+                else
+                {
+                    formsPlot.Plot.SetAxisLimitsY(-60, 0); // Fallback range
+                }
+
                 formsPlot.Refresh();
             });
         }
+        #endregion
 
+        #region Morse Code Handling
         private void DetectMorseTone()
         {
-            int binIndex = (int)(targetFrequency * fftBuffer.Length / waveIn.WaveFormat.SampleRate);
+            int binIndex = (int)(targetFrequency * FFT_SIZE / SAMPLE_RATE);
+            binIndex = Math.Clamp(binIndex, 0, FFT_SIZE / 2 - 1);
+
             float magnitude = (float)Math.Sqrt(
                 fftBuffer[binIndex].X * fftBuffer[binIndex].X +
                 fftBuffer[binIndex].Y * fftBuffer[binIndex].Y);
 
-            decoder.ProcessSample(magnitude > threshold);
+            // Convert threshold back to linear scale for comparison
+            float thresholdLinear = (float)Math.Pow(10, (noiseFloor + (threshold * -noiseFloor)) / 20);
+            decoder.ProcessSample(magnitude > thresholdLinear);
         }
 
-        private void BtnStartStop_Click(object sender, EventArgs e)
-        {
-            if (isRecording)
-            {
-                waveIn.StopRecording();
-                isRecording = false;
-                btnStartStop.Text = "Start Listening";
-                btnStartStop.BackColor = Color.LimeGreen;
-            }
-            else
-            {
-                try
-                {
-                    waveIn.StartRecording();
-                    isRecording = true;
-                    btnStartStop.Text = "Stop Listening (●)";
-                    btnStartStop.BackColor = Color.Red;
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"Audio Error: {ex.Message}");
-                    isRecording = false;
-                }
-            }
-        }
-
-        private void BtnSend_Click(object sender, EventArgs e)
+        private void SendMorse(string text)
         {
             if (serialPort?.IsOpen != true || isTransmitting) return;
 
             isTransmitting = true;
             new Thread(() =>
             {
-                var morse = MorseEncoder.Encode(txtMessage.Text);
+                var morse = MorseEncoder.Encode(text);
                 foreach (var symbol in morse)
                 {
                     if (!isTransmitting) break;
@@ -336,11 +365,59 @@ namespace MorseCodeTranslator
                 SafeInvoke(() => isTransmitting = false);
             }).Start();
         }
+        #endregion
+
+        #region UI Handlers
+        private void BtnStartStop_Click(object sender, EventArgs e)
+        {
+            if (isRecording)
+            {
+                waveIn.StopRecording();
+                UpdateRecordingState(false);
+            }
+            else
+            {
+                try
+                {
+                    waveIn.StartRecording();
+                    UpdateRecordingState(true);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Audio Error: {ex.Message}");
+                }
+            }
+        }
+
+        private void BtnSend_Click(object sender, EventArgs e) => SendMorse(txtMessage.Text);
+
+        private void UpdateRecordingState(bool recording)
+        {
+            isRecording = recording;
+            btnStartStop.Text = recording ? "Stop Listening" : "Start Listening";
+            btnStartStop.BackColor = recording ? Color.Red : Color.LimeGreen;
+        }
+
+        private void UpdateTargetFrequency(int frequency)
+        {
+            targetFrequency = Math.Clamp(frequency, 0, 2000);
+            nudFrequency.Value = targetFrequency;
+            vLine.X = targetFrequency;
+            formsPlot.Refresh();
+        }
 
         private void SetSerialState(bool state)
         {
             if (rbDTR.Checked) serialPort.DtrEnable = state;
             if (rbRTS.Checked) serialPort.RtsEnable = state;
+        }
+        #endregion
+
+        #region Device Management
+        private void RefreshDevices()
+        {
+            RefreshAudioDevices();
+            RefreshComPorts();
         }
 
         private void RefreshAudioDevices()
@@ -348,14 +425,14 @@ namespace MorseCodeTranslator
             cbAudioInput.Items.Clear();
             for (int i = 0; i < WaveIn.DeviceCount; i++)
                 cbAudioInput.Items.Add(WaveIn.GetCapabilities(i).ProductName);
-            if (cbAudioInput.Items.Count > 0) cbAudioInput.SelectedIndex = 0;
+            cbAudioInput.SelectedIndex = WaveIn.DeviceCount > 0 ? 0 : -1;
         }
 
         private void RefreshComPorts()
         {
             cbComPorts.Items.Clear();
             cbComPorts.Items.AddRange(SerialPort.GetPortNames());
-            if (cbComPorts.Items.Count > 0) cbComPorts.SelectedIndex = 0;
+            cbComPorts.SelectedIndex = cbComPorts.Items.Count > 0 ? 0 : -1;
             UpdateSerialPort();
         }
 
@@ -374,29 +451,35 @@ namespace MorseCodeTranslator
                 MessageBox.Show($"COM Port Error: {ex.Message}");
             }
         }
+        #endregion
 
+        #region Utilities
         private void SafeInvoke(Action action)
         {
             if (InvokeRequired) Invoke(action);
             else action();
         }
 
-        protected override void OnFormClosing(FormClosingEventArgs e)
+        private void InitializeComponent()
         {
-            CleanupResources();
-            base.OnFormClosing(e);
+            SuspendLayout();
+            // 
+            // MainForm
+            // 
+            ClientSize = new Size(933, 467);
+            Name = "MainForm";
+            ResumeLayout(false);
         }
 
         private void CleanupResources()
         {
-            waveIn?.StopRecording();
             waveIn?.Dispose();
             serialPort?.Close();
         }
-
-        
+        #endregion
     }
 
+    #region Morse Code Classes
     public class MorseDecoder
     {
         private DateTime lastChange = DateTime.Now;
@@ -477,4 +560,5 @@ namespace MorseCodeTranslator
         public static char? GetChar(string code) =>
             CodeMap.FirstOrDefault(x => x.Value == code).Key;
     }
+    #endregion
 }
